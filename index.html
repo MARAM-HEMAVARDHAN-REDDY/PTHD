@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Image Inference</title>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            background: #f0f0f0;
+            font-family: Arial, sans-serif;
+        }
+        #controlPanel {
+            display: flex;
+            justify-content: flex-start;
+            align-items: center;
+            padding: 10px;
+            background: #333;
+        }
+        .btn {
+            margin-right: 10px;
+            padding: 10px 15px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        .btn:hover {
+            background-color: #45a049;
+        }
+        #fullscreenCanvas {
+            flex-grow: 1;
+            width: 100%;
+        }
+        #fileInput {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="controlPanel">
+        <button id="imageBtn" class="btn">Image Inference</button>
+        <button id="webcamBtn" class="btn">Live Webcam Inference</button>
+        <button id="videoBtn" class="btn">Video Inference</button>
+        <input type="file" id="fileInput" accept="image/*,video/*" />
+    </div>
+    <canvas id="fullscreenCanvas"></canvas>
+    
+    <script>
+        const fullscreenCanvas = document.getElementById("fullscreenCanvas");
+        const fullscreenCtx = fullscreenCanvas.getContext("2d");
+        const threshold = 0.03; // Confidence threshold
+        let model, webcamStream, videoElement;
+
+        async function loadModel() {
+            return await ort.InferenceSession.create("yolov8nq.onnx");
+        }
+
+        async function runModel(model, imageData) {
+            const tensor = new ort.Tensor(Float32Array.from(imageData), [1, 3, 640, 640]);
+            const feeds = { images: tensor };
+            const output = await model.run(feeds);
+            return output["output0"].data;
+        }
+
+        function process_output(output, img_width, img_height) {
+            let boxes = [];
+            const num_boxes = 8400;
+            for (let index = 0; index < num_boxes; index++) {
+                const objness = output[4 * num_boxes + index]; // Objectness score
+                if (objness < threshold) continue; // Skip if confidence is below threshold
+
+                const xc = output[index];
+                const yc = output[num_boxes + index];
+                const w = output[2 * num_boxes + index];
+                const h = output[3 * num_boxes + index];
+                
+                // Transform coordinates
+                const x1 = (xc - w / 2);
+                const y1 = (yc - h / 2);
+                const x2 = (xc + w / 2);
+                const y2 = (yc + h / 2);
+
+                boxes.push([x1, y1, x2, y2, objness]);
+            }
+            
+            boxes = boxes.sort((box1, box2) => box2[4] - box1[4]); // Sort by objectness score
+            const result = [];
+            while (boxes.length > 0) {
+                result.push(boxes[0]);
+                boxes = boxes.filter(box => iou(boxes[0], box) < 0.7); // Apply NMS
+            }
+            return result;
+        }
+
+        function iou(box1, box2) {
+            return intersection(box1, box2) / union(box1, box2);
+        }
+
+        function union(box1, box2) {
+            const [box1_x1, box1_y1, box1_x2, box1_y2] = box1;
+            const [box2_x1, box2_y1, box2_x2, box2_y2] = box2;
+            const box1_area = (box1_x2 - box1_x1) * (box1_y2 - box1_y1);
+            const box2_area = (box2_x2 - box2_x1) * (box2_y2 - box2_y1);
+            return box1_area + box2_area - intersection(box1, box2);
+        }
+
+        function intersection(box1, box2) {
+            const [box1_x1, box1_y1, box1_x2, box1_y2] = box1;
+            const [box2_x1, box2_y1, box2_x2, box2_y2] = box2;
+            const x1 = Math.max(box1_x1, box2_x1);
+            const y1 = Math.max(box1_y1, box2_y1);
+            const x2 = Math.min(box1_x2, box2_x2);
+            const y2 = Math.min(box1_y2, box2_y2);
+            return (x2 - x1) * (y2 - y1);
+        }
+
+
+        function drawDetections(image, boxes) {
+            fullscreenCtx.clearRect(0, 0, fullscreenCanvas.width, fullscreenCanvas.height);
+            fullscreenCtx.drawImage(image, 0, 0, fullscreenCanvas.width, fullscreenCanvas.height);
+            fullscreenCtx.strokeStyle = "#00FF00";
+            fullscreenCtx.lineWidth = 2;
+            fullscreenCtx.font = "24px Arial";
+            
+            boxes.forEach(([x1, y1, x2, y2, prob]) => {
+                fullscreenCtx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+                fullscreenCtx.fillStyle = "#00FF00";
+                const text = `Pothole (${prob.toFixed(2)})`;
+                const textWidth = fullscreenCtx.measureText(text).width;
+                fullscreenCtx.fillRect(x1, y1 - 30, textWidth + 4, 30);
+                fullscreenCtx.fillStyle = "#FFFFFF";
+                fullscreenCtx.fillText(text, x1 + 2, y1 - 5);
+            });
+        }
+
+        async function processImage(imageFile) {
+            const image = new Image();
+            image.onload = async function() {
+                fullscreenCanvas.width = image.width;
+                fullscreenCanvas.height = image.height;
+                const imgData = await getImageData(image);
+                const output = await runModel(model, imgData);
+                const boxes = process_output(output, image.width, image.height);
+                drawDetections(image, boxes);
+            };
+            image.src = URL.createObjectURL(imageFile);
+        }
+
+        async function processVideo(videoFile) {
+            videoElement = document.createElement('video');
+            videoElement.src = URL.createObjectURL(videoFile);
+            videoElement.loop = true;
+            videoElement.muted = true;
+            videoElement.play();
+
+            videoElement.onloadedmetadata = () => {
+                fullscreenCanvas.width = videoElement.videoWidth;
+                fullscreenCanvas.height = videoElement.videoHeight;
+            };
+
+            function processFrame() {
+                if (videoElement.paused || videoElement.ended) return;
+                fullscreenCtx.drawImage(videoElement, 0, 0);
+                const imgData = getImageData(fullscreenCanvas);
+                runModel(model, imgData).then(output => {
+                    const boxes = process_output(output, videoElement.videoWidth, videoElement.videoHeight);
+                    drawDetections(videoElement, boxes);
+                    requestAnimationFrame(processFrame);
+                });
+            }
+
+            videoElement.onplay = processFrame;
+        }
+
+        async function startWebcam() {
+            webcamStream = await navigator.mediaDevices.getUserMedia({ video: true });
+            videoElement = document.createElement('video');
+            videoElement.srcObject = webcamStream;
+            videoElement.play();
+
+            videoElement.onloadedmetadata = () => {
+                fullscreenCanvas.width = videoElement.videoWidth;
+                fullscreenCanvas.height = videoElement.videoHeight;
+            };
+
+            function processFrame() {
+                if (!webcamStream.active) return;
+                fullscreenCtx.drawImage(videoElement, 0, 0);
+                const imgData = getImageData(fullscreenCanvas);
+                runModel(model, imgData).then(output => {
+                    const boxes = process_output(output, videoElement.videoWidth, videoElement.videoHeight);
+                    drawDetections(videoElement, boxes);
+                    requestAnimationFrame(processFrame);
+                });
+            }
+
+            videoElement.onplay = processFrame;
+        }
+
+        function getImageData(imageSource) {
+            const canvas = document.createElement("canvas");
+            canvas.width = 640;
+            canvas.height = 640;
+            const ctx = canvas.getContext("2d");
+            ctx.drawImage(imageSource, 0, 0, 640, 640);
+            const imgData = ctx.getImageData(0, 0, 640, 640);
+            const pixels = imgData.data;
+            const red = [], green = [], blue = [];
+            for (let index = 0; index < pixels.length; index += 4) {
+                red.push(pixels[index] / 255.0);
+                green.push(pixels[index + 1] / 255.0);
+                blue.push(pixels[index + 2] / 255.0);
+            }
+            return [...red, ...green, ...blue];
+        }
+
+        document.getElementById("imageBtn").addEventListener("click", () => {
+            document.getElementById("fileInput").accept = "image/*";
+            document.getElementById("fileInput").click();
+        });
+
+        document.getElementById("videoBtn").addEventListener("click", () => {
+            document.getElementById("fileInput").accept = "video/*";
+            document.getElementById("fileInput").click();
+        });
+
+        document.getElementById("webcamBtn").addEventListener("click", startWebcam);
+
+        document.getElementById("fileInput").addEventListener("change", function(event) {
+            if (event.target.files.length > 0) {
+                const file = event.target.files[0];
+                if (file.type.startsWith("image/")) {
+                    processImage(file);
+                } else if (file.type.startsWith("video/")) {
+                    processVideo(file);
+                }
+            }
+        });
+
+        // Load the model when the page loads
+        window.addEventListener('load', async () => {
+            model = await loadModel();
+        });
+    </script>
+</body>
+</html>
