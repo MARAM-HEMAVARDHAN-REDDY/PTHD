@@ -5,6 +5,7 @@
     <meta charset="UTF-8">
     <title>Live Webcam Inference</title>
     <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
     <style>
         body,
         html {
@@ -44,7 +45,17 @@
         #toggleCameraButton {
             margin: 10px auto;
             padding: 10px 20px;
-            background-color: #00FF00;
+            background-color: #3e673e;
+            color: #000;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        #downloadButton {
+            margin: 10px auto;
+            padding: 10px 20px;
+            background-color: #3e673e;
             color: #000;
             border: none;
             border-radius: 5px;
@@ -55,11 +66,16 @@
         #toggleCameraButton:hover {
             background-color: #00cc00;
         }
+        #downloadButton:hover {
+            background-color: #00cc00;
+        }
     </style>
 </head>
 
 <body>
     <button id="toggleCameraButton">Switch Camera</button>
+    <button id="downloadButton" onclick="downloadLog()">Download Log</button>
+
     <canvas id="fullscreenCanvas"></canvas>
     <div id="MessageDisplayContainer">
         <div id="Message">Running Live Inference...</div>
@@ -74,6 +90,26 @@
         let model, webcamStream, videoElement;
         let currentDeviceIndex = 0;
         let devices = [];
+        let logEntries = [];
+        var previous_pothole_count =0;
+        var current_pothole_count  =0;
+        var currentLocation = "NA";
+
+        function logPotholeData(date, time, location, quantity) {
+            logEntries.push({ Date: date, Time: time, Location: location, Quantity: quantity });
+        }
+
+        function downloadLog() {
+            const worksheet = XLSX.utils.json_to_sheet(logEntries);
+            const workbook = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(workbook, worksheet, "Log");
+
+            const currentDate = new Date();
+            const fileName = `Pothole_Log_${currentDate.toISOString().slice(0, 10)}_${currentDate.toTimeString().slice(0, 8).replace(/:/g, '')}.xlsx`;
+
+            XLSX.writeFile(workbook, fileName);
+        }
+
 
         async function loadModel() {
             const availableProviders = ['webgpu', 'webgl', 'wasm']; // Ordered by preference
@@ -185,12 +221,18 @@
             try {
                 const location = await getCurrentLocation();
                 Result.textContent = `Potholes Detected At [ Latitude: ${location.latitude}, Longitude: ${location.longitude} ]`;
+                currentLocation = `Latitude: ${location.latitude}, Longitude: ${location.longitude}`; // actual location data
+                console.log(Result.textContent)
             } catch (error) {
                 Result.textContent = `Error: ${error}`;
+                currentLocation = `Error: ${error}`;
             }
+            return location;
         }
 
         function drawDetections(image, boxes) {
+            let locatoion_coordinates;
+            let pothole_count = 0;
             fullscreenCtx.clearRect(0, 0, fullscreenCanvas.width, fullscreenCanvas.height);
             fullscreenCtx.drawImage(image, 0, 0, fullscreenCanvas.width, fullscreenCanvas.height);
             fullscreenCtx.strokeStyle = "#fc0303"; // Orange = #fc8c03 , Green  = #00FF00 ,
@@ -203,6 +245,7 @@
 
             boxes.forEach(([x1, y1, x2, y2, prob]) => {
                 mesageResetTimer_count = 0;
+                pothole_count += 1;
                 fullscreenCtx.strokeRect(x1 * (fullscreenCanvas.width / 640), y1 * (fullscreenCanvas.height / 640), (x2 - x1) * (fullscreenCanvas.width / 640), ((y2 - y1) * (fullscreenCanvas.height / 640)));
                 fullscreenCtx.fillStyle = "#fc0303";
                 const text = `Pothole (${prob.toFixed(2)})`;
@@ -210,8 +253,23 @@
                 fullscreenCtx.fillRect(x1 * (fullscreenCanvas.width / 640), (y1 - 25) * (fullscreenCanvas.height / 640), textWidth + 3, 15);
                 fullscreenCtx.fillStyle = "#FFFFFF";
                 fullscreenCtx.fillText(text, (x1 + 2) * (fullscreenCanvas.width / 640), (y1 - 5) * (fullscreenCanvas.height / 640));
-                requestLocationPermission();
+
             });
+
+            current_pothole_count  =pothole_count;
+            if(pothole_count >= 1 && (previous_pothole_count != current_pothole_count)){
+                requestLocationPermission();
+                const currentDate = new Date().toLocaleDateString();
+                const currentTime = new Date().toLocaleTimeString();
+                const quantity = pothole_count; // actual quantity
+                logPotholeData(currentDate, currentTime, currentLocation, quantity);
+                console.log("currentLocation",currentLocation)
+            }
+
+            previous_pothole_count =current_pothole_count;
+
+
+
             if (mesageResetTimer_count == mesageResetTimer_Threshold) {
                 const Result = document.getElementById("Message");
                 Result.textContent = `Running Live Inference...`;
