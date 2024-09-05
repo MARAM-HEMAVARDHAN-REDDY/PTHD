@@ -27,6 +27,15 @@
             max-height: 100%;
             margin: auto;
             display: block;
+            position: relative;
+        }
+
+        #fpsDisplay {
+            color: #afd611;
+            font-size: 45px;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 5px 10px;
+            border-radius: 5px;
         }
 
         #MessageDisplayContainer {
@@ -39,45 +48,42 @@
 
         #Message {
             margin-top: 20px;
-            font-size: 18px;
+            font-size: 50px;
         }
 
-        #toggleCameraButton {
-            margin: 10px auto;
+        #buttonContainer {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin: 10px 0;
+        }
+
+        .button {
             padding: 10px 20px;
             background-color: #3e673e;
             color: #000;
             border: none;
             border-radius: 5px;
             cursor: pointer;
-            font-size: 16px;
-        }
-        #downloadButton {
-            margin: 10px auto;
-            padding: 10px 20px;
-            background-color: #3e673e;
-            color: #000;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-            font-size: 16px;
+            font-size: 25px;
         }
 
-        #toggleCameraButton:hover {
-            background-color: #00cc00;
-        }
-        #downloadButton:hover {
+        .button:hover {
             background-color: #00cc00;
         }
     </style>
 </head>
 
 <body>
-    <button id="toggleCameraButton">Switch Camera</button>
-    <button id="downloadButton" onclick="downloadLog()">Download Log</button>
+    <div id="buttonContainer">
+        <button id="toggleCameraButton" class="button">Switch Camera</button>
+        <button id="downloadButton" class="button" onclick="downloadLog()">Download Log</button>
+    </div>
 
     <canvas id="fullscreenCanvas"></canvas>
+ 
     <div id="MessageDisplayContainer">
+        <div id="fpsDisplay">FPS: 0</div>
         <div id="Message">Running Live Inference...</div>
     </div>
 
@@ -86,14 +92,17 @@
         let mesageResetTimer_count = 0;
         const fullscreenCanvas = document.getElementById("fullscreenCanvas");
         const fullscreenCtx = fullscreenCanvas.getContext("2d");
+        const fpsDisplay = document.getElementById("fpsDisplay");
         const threshold = 0.4; // Confidence threshold
         let model, webcamStream, videoElement;
         let currentDeviceIndex = 0;
         let devices = [];
         let logEntries = [];
-        var previous_pothole_count =0;
-        var current_pothole_count  =0;
+        var previous_pothole_count = 0;
+        var current_pothole_count = 0;
         var currentLocation = "NA";
+        let frameCount = 0;
+        let lastTimestamp = performance.now();
 
         function logPotholeData(date, time, location, quantity) {
             logEntries.push({ Date: date, Time: time, Location: location, Quantity: quantity });
@@ -109,7 +118,6 @@
 
             XLSX.writeFile(workbook, fileName);
         }
-
 
         async function loadModel() {
             const availableProviders = ['webgpu', 'webgl', 'wasm']; // Ordered by preference
@@ -225,125 +233,138 @@
                 console.log(Result.textContent)
             } catch (error) {
                 Result.textContent = `Error: ${error}`;
-                currentLocation = `Error: ${error}`;
+                currentLocation = "NA"; // location data not available
+                console.log(Result.textContent)
             }
-            return location;
         }
 
-        function drawDetections(image, boxes) {
-            let locatoion_coordinates;
-            let pothole_count = 0;
-            fullscreenCtx.clearRect(0, 0, fullscreenCanvas.width, fullscreenCanvas.height);
-            fullscreenCtx.drawImage(image, 0, 0, fullscreenCanvas.width, fullscreenCanvas.height);
-            fullscreenCtx.strokeStyle = "#fc0303"; // Orange = #fc8c03 , Green  = #00FF00 ,
-            fullscreenCtx.lineWidth = 2;
-            fullscreenCtx.font = "12px Arial";
-            mesageResetTimer_count += 1;
-            if (mesageResetTimer_count >= 200) {
-                mesageResetTimer_count = 21;
-            }
+        async function processCameraFrame() {
+            const img_width = videoElement.videoWidth;
+            const img_height = videoElement.videoHeight;
 
-            boxes.forEach(([x1, y1, x2, y2, prob]) => {
+            fullscreenCanvas.width = img_width;
+            fullscreenCanvas.height = img_height;
+            fullscreenCtx.drawImage(videoElement, 0, 0);
+
+            const imageData = fullscreenCtx.getImageData(0, 0, img_width, img_height);
+            const resizedImageData = resizeImageData(imageData, 640, 640);
+            const floatData = preprocess(resizedImageData);
+
+            const output = await runModel(model, floatData);
+
+            const boxes = process_output(output, img_width, img_height);
+
+            drawBoxes(boxes);
+
+            current_pothole_count = boxes.length;
+
+            if (current_pothole_count > previous_pothole_count) {
                 mesageResetTimer_count = 0;
-                pothole_count += 1;
-                fullscreenCtx.strokeRect(x1 * (fullscreenCanvas.width / 640), y1 * (fullscreenCanvas.height / 640), (x2 - x1) * (fullscreenCanvas.width / 640), ((y2 - y1) * (fullscreenCanvas.height / 640)));
-                fullscreenCtx.fillStyle = "#fc0303";
-                const text = `Pothole (${prob.toFixed(2)})`;
-                const textWidth = fullscreenCtx.measureText(text).width;
-                fullscreenCtx.fillRect(x1 * (fullscreenCanvas.width / 640), (y1 - 25) * (fullscreenCanvas.height / 640), textWidth + 3, 15);
-                fullscreenCtx.fillStyle = "#FFFFFF";
-                fullscreenCtx.fillText(text, (x1 + 2) * (fullscreenCanvas.width / 640), (y1 - 5) * (fullscreenCanvas.height / 640));
-
-            });
-
-            current_pothole_count  =pothole_count;
-            if(pothole_count >= 1 && (previous_pothole_count != current_pothole_count)){
+                const currentDate = new Date();
+                const currentTime = currentDate.toLocaleTimeString();
                 requestLocationPermission();
-                const currentDate = new Date().toLocaleDateString();
-                const currentTime = new Date().toLocaleTimeString();
-                const quantity = pothole_count; // actual quantity
-                logPotholeData(currentDate, currentTime, currentLocation, quantity);
-                console.log("currentLocation",currentLocation)
+                logPotholeData(currentDate.toLocaleDateString(), currentTime, currentLocation, current_pothole_count);
             }
 
-            previous_pothole_count =current_pothole_count;
+            previous_pothole_count = current_pothole_count;
 
-
-
-            if (mesageResetTimer_count == mesageResetTimer_Threshold) {
-                const Result = document.getElementById("Message");
-                Result.textContent = `Running Live Inference...`;
-
+            // FPS calculation
+            frameCount++;
+            const currentTimestamp = performance.now();
+            const elapsed = currentTimestamp - lastTimestamp;
+            if (elapsed >= 1000) {  // Update every second
+                const fps = (frameCount / elapsed) * 1000;
+                fpsDisplay.textContent = `FPS: ${Math.round(fps)}`;
+                frameCount = 0;
+                lastTimestamp = currentTimestamp;
             }
+
+            mesageResetTimer_count++;
+            if (mesageResetTimer_count > mesageResetTimer_Threshold) {
+                document.getElementById("Message").textContent = "Running Live Inference...";
+            }
+
+            requestAnimationFrame(processCameraFrame);
         }
 
-        async function startWebcam(deviceId) {
-            if (webcamStream) {
-                webcamStream.getTracks().forEach(track => track.stop());
-            }
-            webcamStream = await navigator.mediaDevices.getUserMedia({ video: { deviceId: deviceId } });
-            videoElement = document.createElement('video');
-            videoElement.srcObject = webcamStream;
-            videoElement.onloadedmetadata = () => {
-                videoElement.play();
-                fullscreenCanvas.width = videoElement.videoWidth;
-                fullscreenCanvas.height = videoElement.videoHeight;
-                detectFrame();
-            };
-        }
-
-        async function detectFrame() {
-            fullscreenCtx.drawImage(videoElement, 0, 0, fullscreenCanvas.width, fullscreenCanvas.height);
-            const imageData = fullscreenCtx.getImageData(0, 0, fullscreenCanvas.width, fullscreenCanvas.height);
-            const processedData = preprocess(imageData);
-            const output = await runModel(model, processedData);
-            const boxes = process_output(output, fullscreenCanvas.width, fullscreenCanvas.height);
-            drawDetections(videoElement, boxes);
-            requestAnimationFrame(detectFrame);
+        function resizeImageData(imageData, targetWidth, targetHeight) {
+            const canvas = document.createElement('canvas');
+            canvas.width = targetWidth;
+            canvas.height = targetHeight;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(fullscreenCanvas, 0, 0, targetWidth, targetHeight);
+            return ctx.getImageData(0, 0, targetWidth, targetHeight);
         }
 
         function preprocess(imageData) {
-            const canvas = document.createElement("canvas");
-            canvas.width = 640;
-            canvas.height = 640;
-            const ctx = canvas.getContext("2d");
-            ctx.drawImage(videoElement, 0, 0, 640, 640);
-            const scaledImageData = ctx.getImageData(0, 0, 640, 640);
-            const data = scaledImageData.data;
-            const floatArray = new Float32Array(640 * 640 * 3);
-            for (let i = 0; i < 640 * 640; i++) {
-                floatArray[i] = data[i * 4] / 255.0; // R
-                floatArray[i + 640 * 640] = data[i * 4 + 1] / 255.0; // G
-                floatArray[i + 2 * 640 * 640] = data[i * 4 + 2] / 255.0; // B
+            const { data, width, height } = imageData;
+            const floatData = new Float32Array(3 * width * height);
+            for (let i = 0; i < width * height; i++) {
+                const r = data[i * 4] / 255;
+                const g = data[i * 4 + 1] / 255;
+                const b = data[i * 4 + 2] / 255;
+                floatData[i] = r;
+                floatData[width * height + i] = g;
+                floatData[2 * width * height + i] = b;
             }
-            return floatArray;
+            return floatData;
         }
 
-        async function getConnectedDevices(type) {
-            const devices = await navigator.mediaDevices.enumerateDevices();
-            return devices.filter(device => device.kind === type);
+        function drawBoxes(boxes) {
+            fullscreenCtx.lineWidth = 2;
+            fullscreenCtx.strokeStyle = "#00FF00";
+            boxes.forEach(([x1, y1, x2, y2, objness]) => {
+                fullscreenCtx.beginPath();
+                fullscreenCtx.rect(x1, y1, x2 - x1, y2 - y1);
+                fullscreenCtx.stroke();
+            });
         }
 
-        async function initializeWebcam() {
-            devices = await getConnectedDevices('videoinput');
-            if (devices.length > 0) {
-                await startWebcam(devices[currentDeviceIndex].deviceId);
-            } else {
-                console.error("No webcam devices found.");
-            }
-        }
-
-        async function switchCamera() {
+        async function toggleCamera() {
             currentDeviceIndex = (currentDeviceIndex + 1) % devices.length;
-            await startWebcam(devices[currentDeviceIndex].deviceId);
+            await switchToCamera(devices[currentDeviceIndex].deviceId);
         }
 
-        document.getElementById("toggleCameraButton").addEventListener("click", switchCamera);
+        async function switchToCamera(deviceId) {
+            if (webcamStream) {
+                const tracks = webcamStream.getTracks();
+                tracks.forEach(track => track.stop());
+            }
 
-        (async () => {
+            webcamStream = await navigator.mediaDevices.getUserMedia({
+                video: {
+                    deviceId: { exact: deviceId },
+                    width: { ideal: 1920 },
+                    height: { ideal: 1080 }
+                }
+            });
+
+            videoElement.srcObject = webcamStream;
+        }
+
+        async function init() {
+            const videoDevices = await navigator.mediaDevices.enumerateDevices();
+            devices = videoDevices.filter(device => device.kind === 'videoinput');
+
+            if (devices.length === 0) {
+                alert("No webcam found");
+                return;
+            }
+
+            videoElement = document.createElement("video");
+            videoElement.autoplay = true;
+            videoElement.playsInline = true;
+            videoElement.style.display = "none";
+            document.body.appendChild(videoElement);
+
             model = await loadModel();
-            await initializeWebcam();
-        })();
+            await switchToCamera(devices[currentDeviceIndex].deviceId);
+
+            videoElement.onloadeddata = processCameraFrame;
+        }
+
+        document.getElementById("toggleCameraButton").addEventListener("click", toggleCamera);
+        init();
     </script>
 </body>
 
